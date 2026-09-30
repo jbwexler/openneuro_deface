@@ -84,6 +84,7 @@ def get_snapshot_tags(dataset: str, openneuro_api_key: str) -> list:
         dataset(id: $dataset) {
             snapshots {
                 tag
+                created
             }
         }
     }
@@ -91,7 +92,9 @@ def get_snapshot_tags(dataset: str, openneuro_api_key: str) -> list:
 
     json = {"query": query, "variables": {"dataset": dataset}}
     response = graphql_operation(json, openneuro_api_key)
-    return [x["tag"] for x in response["data"]["dataset"]["snapshots"]]
+    snapshots = response["data"]["dataset"]["snapshots"]
+    # Tag schemes are mixed, so creation date is the only reliable ordering
+    return [x["tag"] for x in sorted(snapshots, key=lambda x: x["created"])]
 
 
 def get_all_files(dataset: str, openneuro_api_key: str) -> tuple:
@@ -106,10 +109,24 @@ def get_all_files(dataset: str, openneuro_api_key: str) -> tuple:
     return draft_files, files_by_snapshot
 
 
-def get_file_list(draft_files: list, files_by_snapshot: dict, regexes: list) -> list:
-    """Returns subject file paths matching the regexes in the draft or any snapshot."""
+def limit_snapshots(files_by_snapshot: dict, tag: str) -> dict:
+    """Returns only the snapshots up to and including the given tag."""
+    if tag not in files_by_snapshot:
+        raise SystemExit(f"Snapshot {tag} not found, dataset has {list(files_by_snapshot)}")
+
+    limited = {}
+    for snapshot, files in files_by_snapshot.items():
+        limited[snapshot] = files
+        if snapshot == tag:
+            break
+
+    return limited
+
+
+def get_file_list(file_lists: list, regexes: list) -> list:
+    """Returns subject file paths matching the regexes in any of the given file lists."""
     match_list = set()
-    for files in [draft_files] + list(files_by_snapshot.values()):
+    for files in file_lists:
         for file in files:
             if file["directory"] or not file["filename"].startswith("sub-"):
                 continue
@@ -289,9 +306,16 @@ def main():
         help="Send to included email address rather than to one pulled from graphql",
     )
     parser.add_argument(
+        "-s",
+        "--up-to-snapshot",
+        help="Only purge snapshots up to and including this tag, leaving later "
+        "snapshots and the draft alone. Implies --skip-delete.",
+    )
+    parser.add_argument(
         "--skip-delete",
         action=argparse.BooleanOptionalAction,
-        help="Skips the deleteFiles operation when purging.",
+        help="Skips the deleteFiles operation when purging. Defaults on with "
+        "--up-to-snapshot, off otherwise.",
     )
     args = parser.parse_args()
 
@@ -299,18 +323,34 @@ def main():
 
     reg_list = [re.compile(x) for x in args.purge_list.split(",")]
     draft_files, files_by_snapshot = get_all_files(args.dataset, openneuro_api_key)
-    file_list = get_file_list(draft_files, files_by_snapshot, reg_list)
+
+    if args.up_to_snapshot:
+        # Later snapshots and the draft are presumed good, so leave them out entirely
+        files_by_snapshot = limit_snapshots(files_by_snapshot, args.up_to_snapshot)
+        match_lists = list(files_by_snapshot.values())
+    else:
+        match_lists = [draft_files] + list(files_by_snapshot.values())
+
+    skip_delete = args.skip_delete
+    if skip_delete is None:
+        skip_delete = bool(args.up_to_snapshot)
+
+    file_list = get_file_list(match_lists, reg_list)
     draft_file_list = filter_to_draft(draft_files, file_list)
 
     user_input_purge = (
-        input(f"Purge list: {file_list}\nPurge the above files? (y/n) ")
+        input(
+            f"Purge list: {file_list}\n"
+            f"Snapshots: {list(files_by_snapshot)}\n"
+            "Purge the above files? (y/n) "
+        )
         .lower()
         .strip()
         == "y"
     )
     if user_input_purge:
         purge_files(args.dataset, draft_files, files_by_snapshot, file_list,
-                    openneuro_api_key, args.skip_delete)
+                    openneuro_api_key, skip_delete)
 
     if not draft_file_list:
         print("No matching files in the draft, skipping email")
