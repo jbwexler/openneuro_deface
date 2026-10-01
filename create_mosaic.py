@@ -1,6 +1,12 @@
 import argparse
+import os
 import keyring as kr
 from purge_and_email import graphql_operation, get_latest_snapshot, get_snapshot_tags
+
+
+def get_mosaic_url(dataset: str, ref: str, openneuro_url: str = "https://openneuro.org/") -> str:
+    """Returns the url the mosaic pdf is served from."""
+    return os.path.join(openneuro_url, "crn/datasets", dataset, "mosaic", ref)
 
 
 def get_draft_head(dataset: str, openneuro_api_key: str) -> str:
@@ -72,7 +78,7 @@ def main():
     if not create_mosaic(args.dataset, ref, openneuro_api_key):
         raise SystemExit("Mosaic creation failed")
 
-    print("Mosaic creation queued")
+    print(f"Mosaic will be available at {get_mosaic_url(args.dataset, ref)}")
 
 
 if __name__ == "__main__":
