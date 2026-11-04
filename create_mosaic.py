@@ -1,12 +1,18 @@
 import argparse
 import os
+import re
 import keyring as kr
 from purge_and_email import graphql_operation, get_latest_snapshot, get_snapshot_tags
 
 
 def get_mosaic_url(dataset: str, ref: str, openneuro_url: str = "https://openneuro.org/") -> str:
-    """Returns the url the mosaic pdf is served from."""
-    return os.path.join(openneuro_url, "crn/datasets", dataset, "mosaic", ref)
+    """Returns the url the mosaic pdf is served from.
+
+    Openneuro resolves any refish and labels the pdf with the tag or the first 8
+    characters of the hexsha, so the full hash is unnecessary here.
+    """
+    label = ref[:8] if re.fullmatch("[0-9a-f]{40}", ref) else ref
+    return os.path.join(openneuro_url, "crn/datasets", dataset, "mosaic", label)
 
 
 def get_draft_head(dataset: str, openneuro_api_key: str) -> str:
@@ -24,6 +30,44 @@ def get_draft_head(dataset: str, openneuro_api_key: str) -> str:
     json = {"query": query, "variables": {"dataset": dataset}}
     response = graphql_operation(json, openneuro_api_key)
     return response["data"]["dataset"]["draft"]["head"]
+
+
+def read_ds_list(path: str) -> list:
+    """Returns the dataset numbers in a file holding one per line."""
+    with open(path) as ds_list_file:
+        return [line.strip() for line in ds_list_file if line.strip()]
+
+
+def check_dataset(dataset: str, openneuro_api_key: str) -> None:
+    """Raises ValueError if openneuro does not have the dataset."""
+    query = """
+    query($dataset: ID!) {
+        dataset(id: $dataset) {
+            id
+        }
+    }
+    """
+
+    json = {"query": query, "variables": {"dataset": dataset}}
+    response = graphql_operation(json, openneuro_api_key)
+    if "errors" in response:
+        raise ValueError(response["errors"][0].get("message"))
+
+
+def get_ref(dataset: str, tag: str, draft: bool, openneuro_api_key: str) -> str:
+    """Returns the git ref to build the mosaic from."""
+    check_dataset(dataset, openneuro_api_key)
+
+    if draft:
+        return get_draft_head(dataset, openneuro_api_key)
+
+    if tag:
+        tag_list = get_snapshot_tags(dataset, openneuro_api_key)
+        if tag not in tag_list:
+            raise ValueError(f"snapshot {tag} not found, dataset has {tag_list}")
+        return tag
+
+    return get_latest_snapshot(dataset, openneuro_api_key)
 
 
 def create_mosaic(dataset: str, ref: str, openneuro_api_key: str) -> bool:
@@ -48,7 +92,13 @@ def create_mosaic(dataset: str, ref: str, openneuro_api_key: str) -> bool:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("dataset", help="Dataset number")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("dataset", nargs="?", help="Dataset number")
+    source.add_argument(
+        "-f",
+        "--ds-list",
+        help="File holding one dataset number per line, built in place of a dataset.",
+    )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "-t",
@@ -65,20 +115,27 @@ def main():
 
     openneuro_api_key = kr.get_password('openneuro_deface', 'openneuro_api_key')
 
-    if args.draft:
-        ref = get_draft_head(args.dataset, openneuro_api_key)
-    elif args.tag:
-        tag_list = get_snapshot_tags(args.dataset, openneuro_api_key)
-        if args.tag not in tag_list:
-            raise SystemExit(f"Snapshot {args.tag} not found, dataset has {tag_list}")
-        ref = args.tag
+    if args.ds_list:
+        dataset_list = read_ds_list(args.ds_list)
     else:
-        ref = get_latest_snapshot(args.dataset, openneuro_api_key)
+        dataset_list = [args.dataset]
 
-    if not create_mosaic(args.dataset, ref, openneuro_api_key):
-        raise SystemExit("Mosaic creation failed")
+    failed_list = []
+    for dataset in dataset_list:
+        try:
+            ref = get_ref(dataset, args.tag, args.draft, openneuro_api_key)
+        except ValueError as error:
+            print(f"Skipping {dataset}: {error}")
+            failed_list.append(dataset)
+            continue
 
-    print(f"Mosaic will be available at {get_mosaic_url(args.dataset, ref)}")
+        if create_mosaic(dataset, ref, openneuro_api_key):
+            print(f"  will be available at {get_mosaic_url(dataset, ref)}")
+        else:
+            failed_list.append(dataset)
+
+    if failed_list:
+        raise SystemExit(f"Mosaic creation failed for {failed_list}")
 
 
 if __name__ == "__main__":
