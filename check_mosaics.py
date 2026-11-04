@@ -20,13 +20,7 @@ NON_DEFACED_FILES_COL = "I"
 COMMENTS_COL = "J"
 SKULL_STRIPPED_COL = "R"
 
-DEFACED_CHOICES = [
-    "yes",
-    "n/a",
-    "no - emailed",
-    "no - in progress",
-    "no - unresolvable",
-]
+DEFACED_CHOICES = ["yes", "no", "n/a"]
 
 
 def download_mosaic(dataset: str, ref: str, openneuro_api_key: str, out_dir: str) -> str:
