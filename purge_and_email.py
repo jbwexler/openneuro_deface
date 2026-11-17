@@ -22,6 +22,10 @@ from sheet import (
 )
 
 
+# Purge pattern that matches every nifti inside an anat directory
+ALL_ANAT = "all anat"
+
+
 def graphql_operation(json, openneuro_api_key, openneuro_url="https://openneuro.org/"):
     """Submits graphql operation."""
     headers = {
@@ -135,18 +139,45 @@ def limit_snapshots(files_by_snapshot: dict, tag: str) -> dict:
     return limited
 
 
-def get_file_list(file_lists: list, regexes: list) -> list:
-    """Returns subject file paths matching the regexes in any of the given file lists."""
+def is_anat_nifti(path: str) -> bool:
+    """Returns whether the path is a nifti inside an anat directory."""
+    return "anat" in path.split("/")[:-1] and path.endswith((".nii", ".nii.gz"))
+
+
+def has_all_anat(patterns: list) -> bool:
+    """Returns whether the purge patterns include ALL_ANAT."""
+    return any(x.lower() == ALL_ANAT for x in patterns)
+
+
+def summarize_for_email(file_list: list, patterns: list) -> tuple:
+    """Returns (all_anat, files to list), dropping anat niftis when ALL_ANAT covers them."""
+    if not has_all_anat(patterns):
+        return False, file_list
+    others = [x for x in file_list if not is_anat_nifti(x)]
+    if len(others) == len(file_list):
+        return False, file_list
+    return True, others
+
+
+def get_file_list(file_lists: list, patterns: list) -> list:
+    """Returns subject file paths matching the patterns in any of the given file lists.
+
+    Each pattern is a regex matched against the basename, or ALL_ANAT, which matches
+    every nifti inside an anat directory.
+    """
+    regexes = [re.compile(x) for x in patterns if x.lower() != ALL_ANAT]
+    all_anat = has_all_anat(patterns)
     match_list = set()
     for files in file_lists:
         for file in files:
             if file["directory"] or not file["filename"].startswith("sub-"):
                 continue
+            if all_anat and is_anat_nifti(file["filename"]):
+                match_list.add(file["filename"])
+                continue
             basename = os.path.basename(file["filename"])
-            for reg in regexes:
-                if re.match(reg, basename):
-                    match_list.add(file["filename"])
-                    break
+            if any(reg.match(basename) for reg in regexes):
+                match_list.add(file["filename"])
 
     return sorted(match_list)
 
@@ -275,19 +306,30 @@ def get_uploader_email(dataset: str, openneuro_api_key: str) -> str:
     uploader = response["data"]["dataset"]["uploader"]
     return uploader["email"]
 
-def send_email(dataset: str, recipient: str, file_list: list) -> None:
-    """Sends email to uploader about non-defaced data."""
+def send_email(dataset: str, recipient: str, file_list: list, all_anat: bool = False) -> None:
+    """Sends email to uploader about non-defaced data.
+
+    With all_anat, the email names all of the anatomical images rather than listing
+    them, and file_list holds only the other files.
+    """
+    if all_anat and file_list:
+        images = "the anatomical images and the following images"
+    elif all_anat:
+        images = "the anatomical images"
+    else:
+        images = "the following images"
+    file_block = f"<pre>{chr(10).join(file_list)}</pre>" if file_list else ""
 
     email_body = textwrap.dedent("""
-    <p>Hello,<br>We've recently discovered that the following images in OpenNeuro dataset $dataset
+    <p>Hello,<br>We've recently discovered that $images in OpenNeuro dataset $dataset
     have not been defaced and thus have been removed. We would greatly appreciate it
     if you could take the time to deface these images and re-upload! We recommend
     using <a href="https://github.com/poldracklab/pydeface">pydeface</a>. Please reach
     out if you have any questions.</p>
-    <pre>$file_list</pre>
+    $file_block
     <p>Best,<br>Joe</p>
     <p>--<br>OpenNeuro<br>Stanford University</p>
-    """).replace("$dataset", dataset).replace("$file_list", "\n".join(file_list))
+    """).replace("$images", images).replace("$dataset", dataset).replace("$file_block", file_block)
 
     msg = EmailMessage()
     msg['Subject'] = f"OpenNeuro Dataset {dataset} Defacing"
@@ -320,7 +362,7 @@ def process_dataset(dataset: str, row: list, purge_list: str, recipient_email: s
             return {}
         print(f"non_defaced_files: {purge_list}")
 
-    reg_list = [re.compile(x.strip()) for x in purge_list.split(",")]
+    patterns = [x.strip() for x in purge_list.split(",")]
     draft_files, files_by_snapshot = get_all_files(dataset, openneuro_api_key)
 
     if up_to_snapshot:
@@ -333,7 +375,7 @@ def process_dataset(dataset: str, row: list, purge_list: str, recipient_email: s
     if skip_delete is None:
         skip_delete = bool(up_to_snapshot)
 
-    file_list = get_file_list(match_lists, reg_list)
+    file_list = get_file_list(match_lists, patterns)
     draft_file_list = filter_to_draft(draft_files, file_list)
 
     if not file_list:
@@ -375,7 +417,8 @@ def process_dataset(dataset: str, row: list, purge_list: str, recipient_email: s
         input(f"Send email to {recipient_email}? (y/n) ").lower().strip() == "y"
     )
     if user_input_email:
-        send_email(dataset, recipient_email, draft_file_list)
+        all_anat, email_files = summarize_for_email(draft_file_list, patterns)
+        send_email(dataset, recipient_email, email_files, all_anat)
         updates[DEFACED_COL] = "no - emailed"
         updates[EMAILED_SUBMITTER_COL] = recipient_email
         updates[EMAILED_DATE_COL] = str(datetime.date.today())
@@ -400,7 +443,8 @@ def main():
     parser.add_argument(
         "-p",
         "--purge-list",
-        help="Comma-separated list of regex patterns for files to purge. "
+        help="Comma-separated list of regex patterns for files to purge, matched "
+        "against the basename. 'all anat' matches every nifti in an anat directory. "
         "Defaults to the dataset's non_defaced_files in the sheet.",
     )
     parser.add_argument(
