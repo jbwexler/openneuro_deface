@@ -1,24 +1,23 @@
 import argparse
 import datetime
 import os
+import readline  # noqa: F401  -- gives input() arrow key editing and history
 import subprocess
 import tempfile
-import gspread
 import keyring as kr
 import requests
-from google.auth.exceptions import RefreshError
-from create_mosaic import get_mosaic_url, get_ref, read_ds_list
-
-AUTHORIZED_USER_PATH = os.path.expanduser("~/.config/gspread/authorized_user.json")
-SPREADSHEET_KEY = "1kk9D_uVTUUeuaV6LYmZORS3g9DN_qBPHBQ9apH0mMKo"
-WORKSHEET_ID = 1163961336
-
-# Spreadsheet columns the review fills in, keyed by the header they sit under
-DEFACED_COL = "G"
-DEFACE_CHECK_DATE_COL = "H"
-NON_DEFACED_FILES_COL = "I"
-COMMENTS_COL = "J"
-SKULL_STRIPPED_COL = "R"
+from create_mosaic import get_mosaic_url, get_ref
+from purge_and_email import read_ds_list
+from sheet import (
+    COMMENTS_COL,
+    DEFACE_CHECK_DATE_COL,
+    DEFACED_COL,
+    NON_DEFACED_FILES_COL,
+    SKULL_STRIPPED_COL,
+    get_row_numbers,
+    get_worksheet,
+    write_row,
+)
 
 DEFACED_CHOICES = ["yes", "no", "n/a"]
 
@@ -72,39 +71,6 @@ def review_dataset(dataset: str) -> dict:
 
     # A blank answer means leave the cell alone rather than clear it
     return {column: value for column, value in review.items() if value}
-
-
-def open_worksheet() -> gspread.Worksheet:
-    """Returns the deface tracking worksheet using the stored authorization."""
-    client = gspread.oauth()
-    return client.open_by_key(SPREADSHEET_KEY).get_worksheet_by_id(WORKSHEET_ID)
-
-
-def get_worksheet() -> gspread.Worksheet:
-    """Returns the deface tracking worksheet, reauthorizing if the token has expired."""
-    try:
-        return open_worksheet()
-    except RefreshError:
-        # gspread only runs the browser flow when the stored token is missing
-        print("Google authorization expired, reauthorizing in the browser")
-        os.remove(AUTHORIZED_USER_PATH)
-        return open_worksheet()
-
-
-def get_row_numbers(worksheet: gspread.Worksheet) -> dict:
-    """Returns a {dataset: row number} dict for the whole sheet."""
-    dataset_column = worksheet.col_values(1)
-    return {dataset: number for number, dataset in enumerate(dataset_column, start=1) if dataset}
-
-
-def write_review(worksheet: gspread.Worksheet, row_number: int, review: dict) -> None:
-    """Writes the reviewed columns into the dataset's row."""
-    worksheet.batch_update(
-        [
-            {"range": f"{column}{row_number}", "values": [[value]]}
-            for column, value in review.items()
-        ]
-    )
 
 
 def main():
@@ -169,7 +135,7 @@ def main():
             if args.dry_run:
                 print(f"  would write row {row_numbers[dataset]}: {review}")
             else:
-                write_review(worksheet, row_numbers[dataset], review)
+                write_row(worksheet, row_numbers[dataset], review)
                 print(f"  wrote row {row_numbers[dataset]}")
 
     if skipped_list:

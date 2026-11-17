@@ -2,7 +2,7 @@ import argparse
 import os
 import re
 import keyring as kr
-from purge_and_email import graphql_operation, get_latest_snapshot, get_snapshot_tags
+from purge_and_email import graphql_operation, get_latest_snapshot, get_snapshot_tags, read_ds_list
 
 
 def get_mosaic_url(dataset: str, ref: str, openneuro_url: str = "https://openneuro.org/") -> str:
@@ -30,12 +30,6 @@ def get_draft_head(dataset: str, openneuro_api_key: str) -> str:
     json = {"query": query, "variables": {"dataset": dataset}}
     response = graphql_operation(json, openneuro_api_key)
     return response["data"]["dataset"]["draft"]["head"]
-
-
-def read_ds_list(path: str) -> list:
-    """Returns the dataset numbers in a file holding one per line."""
-    with open(path) as ds_list_file:
-        return [line.strip() for line in ds_list_file if line.strip()]
 
 
 def check_dataset(dataset: str, openneuro_api_key: str) -> None:

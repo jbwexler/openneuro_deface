@@ -292,6 +292,12 @@ def send_email(dataset: str, recipient: str, file_list: list) -> None:
         mailserver.send_message(msg)
 
 
+def read_ds_list(path: str) -> list:
+    """Returns the dataset numbers in a file holding one per line."""
+    with open(path) as ds_list_file:
+        return [line.strip() for line in ds_list_file if line.strip()]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--dataset", help="Dataset number")
