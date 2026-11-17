@@ -14,6 +14,7 @@ from sheet import (
     EMAILED_DATE_COL,
     EMAILED_SUBMITTER_COL,
     NON_DEFACED_FILES_COL,
+    NON_DEFACED_CONSENT_COL,
     PURGED_DATA_COL,
     get_cell,
     get_rows,
@@ -355,6 +356,10 @@ def read_ds_list(path: str) -> list:
 def process_dataset(dataset: str, row: list, purge_list: str, recipient_email: str,
                     up_to_snapshot: str, skip_delete: bool, openneuro_api_key: str) -> dict:
     """Purges and emails for one dataset, returning the sheet columns to write."""
+    if get_cell(row, NON_DEFACED_CONSENT_COL).lower() == "yes":
+        print(f"Skipping {dataset}: nondefaced_consent is yes")
+        return {}
+
     if not purge_list:
         purge_list = get_cell(row, NON_DEFACED_FILES_COL)
         if not purge_list:
