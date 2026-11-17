@@ -2,12 +2,24 @@ import requests
 import os
 import argparse
 import config
+import datetime
 import re
 import smtplib
 import keyring as kr
 import textwrap
 from email.message import EmailMessage
 from requests.adapters import HTTPAdapter, Retry
+from sheet import (
+    DEFACED_COL,
+    EMAILED_DATE_COL,
+    EMAILED_SUBMITTER_COL,
+    NON_DEFACED_FILES_COL,
+    PURGED_DATA_COL,
+    get_cell,
+    get_rows,
+    get_worksheet,
+    write_row,
+)
 
 
 def graphql_operation(json, openneuro_api_key, openneuro_url="https://openneuro.org/"):
@@ -298,13 +310,98 @@ def read_ds_list(path: str) -> list:
         return [line.strip() for line in ds_list_file if line.strip()]
 
 
+def process_dataset(dataset: str, row: list, purge_list: str, recipient_email: str,
+                    up_to_snapshot: str, skip_delete: bool, openneuro_api_key: str) -> dict:
+    """Purges and emails for one dataset, returning the sheet columns to write."""
+    if not purge_list:
+        purge_list = get_cell(row, NON_DEFACED_FILES_COL)
+        if not purge_list:
+            print(f"Skipping {dataset}: no non_defaced_files in the sheet")
+            return {}
+        print(f"non_defaced_files: {purge_list}")
+
+    reg_list = [re.compile(x.strip()) for x in purge_list.split(",")]
+    draft_files, files_by_snapshot = get_all_files(dataset, openneuro_api_key)
+
+    if up_to_snapshot:
+        # Later snapshots and the draft are presumed good, so leave them out entirely
+        files_by_snapshot = limit_snapshots(files_by_snapshot, up_to_snapshot)
+        match_lists = list(files_by_snapshot.values())
+    else:
+        match_lists = [draft_files] + list(files_by_snapshot.values())
+
+    if skip_delete is None:
+        skip_delete = bool(up_to_snapshot)
+
+    file_list = get_file_list(match_lists, reg_list)
+    draft_file_list = filter_to_draft(draft_files, file_list)
+
+    if not file_list:
+        print(f"Skipping {dataset}: no files match {purge_list}")
+        return {}
+
+    updates = {}
+    if get_cell(row, PURGED_DATA_COL):
+        print(f"Skipping purge: purged_data is already {get_cell(row, PURGED_DATA_COL)!r}")
+        user_input_purge = False
+    else:
+        user_input_purge = (
+            input(
+                f"Purge list: {file_list}\n"
+                f"Snapshots: {list(files_by_snapshot)}\n"
+                "Purge the above files? (y/n) "
+            )
+            .lower()
+            .strip()
+            == "y"
+        )
+    if user_input_purge:
+        purge_files(dataset, draft_files, files_by_snapshot, file_list,
+                    openneuro_api_key, skip_delete)
+        updates[PURGED_DATA_COL] = "yes"
+
+    if get_cell(row, EMAILED_SUBMITTER_COL):
+        print(f"Skipping email: already emailed {get_cell(row, EMAILED_SUBMITTER_COL)}")
+        return updates
+
+    if not draft_file_list:
+        print("No matching files in the draft, skipping email")
+        return updates
+
+    if not recipient_email:
+        recipient_email = get_uploader_email(dataset, openneuro_api_key)
+
+    user_input_email = (
+        input(f"Send email to {recipient_email}? (y/n) ").lower().strip() == "y"
+    )
+    if user_input_email:
+        send_email(dataset, recipient_email, draft_file_list)
+        updates[DEFACED_COL] = "no - emailed"
+        updates[EMAILED_SUBMITTER_COL] = recipient_email
+        updates[EMAILED_DATE_COL] = str(datetime.date.today())
+
+    return updates
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-d", "--dataset", help="Dataset number")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument(
+        "dataset",
+        nargs="?",
+        help="Dataset number. Without a dataset or --ds-list, every dataset the sheet "
+        "marks defaced 'no' that is not yet both purged and emailed is processed.",
+    )
+    source.add_argument(
+        "-f",
+        "--ds-list",
+        help="File holding one dataset number per line, processed in place of a dataset.",
+    )
     parser.add_argument(
         "-p",
         "--purge-list",
-        help="Comma-separated list of regex patterns for files to purge",
+        help="Comma-separated list of regex patterns for files to purge. "
+        "Defaults to the dataset's non_defaced_files in the sheet.",
     )
     parser.add_argument(
         "-e",
@@ -323,55 +420,59 @@ def main():
         help="Skips the deleteFiles operation when purging. Defaults on with "
         "--up-to-snapshot, off otherwise.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Purge and email as usual but print the sheet updates instead of writing them.",
+    )
     args = parser.parse_args()
+
+    if not args.dataset and (args.purge_list or args.email or args.up_to_snapshot):
+        parser.error("--purge-list, --email and --up-to-snapshot are per dataset, "
+                     "so they need a single dataset")
 
     openneuro_api_key = kr.get_password('openneuro_deface', 'openneuro_api_key')
 
-    reg_list = [re.compile(x) for x in args.purge_list.split(",")]
-    draft_files, files_by_snapshot = get_all_files(args.dataset, openneuro_api_key)
+    worksheet = get_worksheet()
+    rows = get_rows(worksheet)
 
-    if args.up_to_snapshot:
-        # Later snapshots and the draft are presumed good, so leave them out entirely
-        files_by_snapshot = limit_snapshots(files_by_snapshot, args.up_to_snapshot)
-        match_lists = list(files_by_snapshot.values())
+    if args.ds_list:
+        dataset_list = read_ds_list(args.ds_list)
+    elif args.dataset:
+        dataset_list = [args.dataset]
     else:
-        match_lists = [draft_files] + list(files_by_snapshot.values())
+        # "no - emailed" and the like are already handled, so only a bare "no" is pending
+        dataset_list = [
+            dataset for dataset, (_, row) in rows.items()
+            if get_cell(row, DEFACED_COL).lower() == "no"
+            and not (get_cell(row, PURGED_DATA_COL) and get_cell(row, EMAILED_SUBMITTER_COL))
+        ]
+        print(f"Found {len(dataset_list)} datasets still to purge or email: {dataset_list}")
 
-    skip_delete = args.skip_delete
-    if skip_delete is None:
-        skip_delete = bool(args.up_to_snapshot)
+    skipped_list = []
+    for number, dataset in enumerate(dataset_list, start=1):
+        print(f"\n=== {dataset} ({number}/{len(dataset_list)}) ===")
 
-    file_list = get_file_list(match_lists, reg_list)
-    draft_file_list = filter_to_draft(draft_files, file_list)
+        if dataset not in rows:
+            print(f"Skipping {dataset}: no row in the sheet")
+            skipped_list.append(dataset)
+            continue
 
-    user_input_purge = (
-        input(
-            f"Purge list: {file_list}\n"
-            f"Snapshots: {list(files_by_snapshot)}\n"
-            "Purge the above files? (y/n) "
-        )
-        .lower()
-        .strip()
-        == "y"
-    )
-    if user_input_purge:
-        purge_files(args.dataset, draft_files, files_by_snapshot, file_list,
-                    openneuro_api_key, skip_delete)
+        row_number, row = rows[dataset]
+        updates = process_dataset(dataset, row, args.purge_list, args.email,
+                                  args.up_to_snapshot, args.skip_delete, openneuro_api_key)
+        if not updates:
+            skipped_list.append(dataset)
+            continue
 
-    if not draft_file_list:
-        print("No matching files in the draft, skipping email")
-        return
+        if args.dry_run:
+            print(f"  would write row {row_number}: {updates}")
+        else:
+            write_row(worksheet, row_number, updates)
+            print(f"  wrote row {row_number}: {updates}")
 
-    if args.email:
-        recipient_email = args.email
-    else:
-        recipient_email = get_uploader_email(args.dataset, openneuro_api_key)
-
-    user_input_email = (
-        input(f"Send email to {recipient_email}? (y/n) ").lower().strip() == "y"
-    )
-    if user_input_email:
-        send_email(args.dataset, recipient_email, draft_file_list)
+    if skipped_list:
+        print(f"\nSkipped {skipped_list}")
 
 
 if __name__ == "__main__":
