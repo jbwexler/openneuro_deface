@@ -325,8 +325,9 @@ def send_email(dataset: str, recipient: str, file_list: list, all_anat: bool = F
     <p>Hello,<br>We've recently discovered that $images in OpenNeuro dataset $dataset
     have not been defaced and thus have been removed. We would greatly appreciate it
     if you could take the time to deface these images and re-upload! We recommend
-    using <a href="https://github.com/poldracklab/pydeface">pydeface</a>. Please reach
-    out if you have any questions.</p>
+    using <a href="https://github.com/poldracklab/pydeface">pydeface</a> for defacing
+    and <a href="https://github.com/jbwexler/bids-mosaic">bids-mosaic</a> for checking
+    the quality of the defacing. Please reach out if you have any questions.</p>
     $file_block
     <p>Best,<br>Joe</p>
     <p>--<br>OpenNeuro<br>Stanford University</p>
