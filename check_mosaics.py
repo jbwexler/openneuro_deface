@@ -15,8 +15,11 @@ from sheet import (
     COMMENTS_COL,
     DEFACE_CHECK_DATE_COL,
     DEFACED_COL,
+    MADE_PUBLIC_COL,
+    NON_DEFACED_CONSENT_COL,
     NON_DEFACED_FILES_COL,
     SKULL_STRIPPED_COL,
+    get_cell,
     get_rows,
     get_worksheet,
     write_row,
@@ -103,6 +106,18 @@ def review_dataset(dataset: str) -> dict:
     return {column: value for column, value in review.items() if value}
 
 
+def get_pending(rows: dict) -> list:
+    """Returns the public datasets the sheet has no defaced verdict for yet, leaving
+    out those whose submitters consented to sharing non-defaced data."""
+    return [
+        dataset for dataset, (_, row) in rows.items()
+        if not get_cell(row, DEFACED_COL)
+        # Unreleased datasets show #N/A, since the lookups only cover public ones
+        and get_cell(row, MADE_PUBLIC_COL) not in ("", "#N/A")
+        and get_cell(row, NON_DEFACED_CONSENT_COL).lower() != "yes"
+    ]
+
+
 def apply_updates(row: list, updates: dict) -> list:
     """Returns a copy of the row values with the {column: value} updates applied."""
     row = list(row)
@@ -124,8 +139,13 @@ def write_or_print(worksheet, row_number: int, updates: dict, dry_run: bool) -> 
 
 def main():
     parser = argparse.ArgumentParser()
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("dataset", nargs="?", help="Dataset number")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument(
+        "dataset",
+        nargs="?",
+        help="Dataset number. Without a dataset or --ds-list, every public dataset the "
+        "sheet has no defaced verdict for is reviewed.",
+    )
     source.add_argument(
         "-f",
         "--ds-list",
@@ -153,13 +173,16 @@ def main():
 
     openneuro_api_key = kr.get_password('openneuro_deface', 'openneuro_api_key')
 
-    if args.ds_list:
-        dataset_list = read_ds_list(args.ds_list)
-    else:
-        dataset_list = [args.dataset]
-
     worksheet = get_worksheet()
     rows = get_rows(worksheet)
+
+    if args.ds_list:
+        dataset_list = read_ds_list(args.ds_list)
+    elif args.dataset:
+        dataset_list = [args.dataset]
+    else:
+        dataset_list = get_pending(rows)
+        print(f"Found {len(dataset_list)} datasets still to review")
 
     skipped_list = []
     with tempfile.TemporaryDirectory() as out_dir:
