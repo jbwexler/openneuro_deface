@@ -10,14 +10,14 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from create_mosaic import get_mosaic_url, get_ref
-from purge_and_email import read_ds_list
+from purge_and_email import process_dataset, read_ds_list
 from sheet import (
     COMMENTS_COL,
     DEFACE_CHECK_DATE_COL,
     DEFACED_COL,
     NON_DEFACED_FILES_COL,
     SKULL_STRIPPED_COL,
-    get_row_numbers,
+    get_rows,
     get_worksheet,
     write_row,
 )
@@ -103,6 +103,25 @@ def review_dataset(dataset: str) -> dict:
     return {column: value for column, value in review.items() if value}
 
 
+def apply_updates(row: list, updates: dict) -> list:
+    """Returns a copy of the row values with the {column: value} updates applied."""
+    row = list(row)
+    for column, value in updates.items():
+        index = ord(column) - ord("A")
+        row.extend([""] * (index + 1 - len(row)))
+        row[index] = value
+    return row
+
+
+def write_or_print(worksheet, row_number: int, updates: dict, dry_run: bool) -> None:
+    """Writes the updates into the row, or prints them on a dry run."""
+    if dry_run:
+        print(f"  would write row {row_number}: {updates}")
+    else:
+        write_row(worksheet, row_number, updates)
+        print(f"  wrote row {row_number}: {updates}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     source = parser.add_mutually_exclusive_group(required=True)
@@ -127,7 +146,8 @@ def main():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Prompt as usual but print the review instead of writing to the sheet.",
+        help="Prompt as usual but print the sheet updates instead of writing them. "
+        "Purging and emailing still happen if confirmed.",
     )
     args = parser.parse_args()
 
@@ -139,14 +159,14 @@ def main():
         dataset_list = [args.dataset]
 
     worksheet = get_worksheet()
-    row_numbers = get_row_numbers(worksheet)
+    rows = get_rows(worksheet)
 
     skipped_list = []
     with tempfile.TemporaryDirectory() as out_dir:
         for number, dataset in enumerate(dataset_list, start=1):
             print(f"\n=== {dataset} ({number}/{len(dataset_list)}) ===")
 
-            if dataset not in row_numbers:
+            if dataset not in rows:
                 print(f"Skipping {dataset}: no row in the sheet")
                 skipped_list.append(dataset)
                 continue
@@ -161,12 +181,15 @@ def main():
 
             display_mosaic(path)
             review = review_dataset(dataset)
+            row_number, row = rows[dataset]
+            write_or_print(worksheet, row_number, review, args.dry_run)
 
-            if args.dry_run:
-                print(f"  would write row {row_numbers[dataset]}: {review}")
-            else:
-                write_row(worksheet, row_numbers[dataset], review)
-                print(f"  wrote row {row_numbers[dataset]}")
+            if review[DEFACED_COL] == "no":
+                # Purge from the row as just reviewed, so the new non_defaced_files is used
+                updates = process_dataset(dataset, apply_updates(row, review), None, None,
+                                          None, None, openneuro_api_key)
+                if updates:
+                    write_or_print(worksheet, row_number, updates, args.dry_run)
 
     if skipped_list:
         print(f"\nSkipped {skipped_list}")
