@@ -354,6 +354,14 @@ def read_ds_list(path: str) -> list:
         return [line.strip() for line in ds_list_file if line.strip()]
 
 
+def needs_purge_or_email(row: list) -> bool:
+    """Returns whether the sheet marks the dataset not defaced but it is not yet both
+    purged and emailed."""
+    # "no - emailed" and the like are already handled, so only a bare "no" is pending
+    return (get_cell(row, DEFACED_COL).lower() == "no"
+            and not (get_cell(row, PURGED_DATA_COL) and get_cell(row, EMAILED_SUBMITTER_COL)))
+
+
 def process_dataset(dataset: str, row: list, purge_list: str, recipient_email: str,
                     up_to_snapshot: str, skip_delete: bool, openneuro_api_key: str) -> dict:
     """Purges and emails for one dataset, returning the sheet columns to write."""
@@ -491,12 +499,8 @@ def main():
     elif args.dataset:
         dataset_list = [args.dataset]
     else:
-        # "no - emailed" and the like are already handled, so only a bare "no" is pending
-        dataset_list = [
-            dataset for dataset, (_, row) in rows.items()
-            if get_cell(row, DEFACED_COL).lower() == "no"
-            and not (get_cell(row, PURGED_DATA_COL) and get_cell(row, EMAILED_SUBMITTER_COL))
-        ]
+        dataset_list = [dataset for dataset, (_, row) in rows.items()
+                        if needs_purge_or_email(row)]
         print(f"Found {len(dataset_list)} datasets still to purge or email: {dataset_list}")
 
     skipped_list = []

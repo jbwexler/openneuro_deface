@@ -10,7 +10,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from create_mosaic import get_mosaic_url, get_ref
-from purge_and_email import process_dataset, read_ds_list
+from purge_and_email import needs_purge_or_email, process_dataset, read_ds_list
 from sheet import (
     COMMENTS_COL,
     DEFACE_CHECK_DATE_COL,
@@ -106,16 +106,29 @@ def review_dataset(dataset: str) -> dict:
     return {column: value for column, value in review.items() if value}
 
 
+def needs_review(row: list) -> bool:
+    """Returns whether the dataset is public and the sheet has no defaced verdict yet."""
+    # Unreleased datasets show #N/A, since the lookups only cover public ones
+    return (not get_cell(row, DEFACED_COL)
+            and get_cell(row, MADE_PUBLIC_COL) not in ("", "#N/A"))
+
+
 def get_pending(rows: dict) -> list:
-    """Returns the public datasets the sheet has no defaced verdict for yet, leaving
-    out those whose submitters consented to sharing non-defaced data."""
+    """Returns the datasets still to review or to purge and email, leaving out those
+    whose submitters consented to sharing non-defaced data."""
     return [
         dataset for dataset, (_, row) in rows.items()
-        if not get_cell(row, DEFACED_COL)
-        # Unreleased datasets show #N/A, since the lookups only cover public ones
-        and get_cell(row, MADE_PUBLIC_COL) not in ("", "#N/A")
+        if (needs_review(row) or needs_purge_or_email(row))
         and get_cell(row, NON_DEFACED_CONSENT_COL).lower() != "yes"
     ]
+
+
+def purge_and_email(worksheet, dataset: str, row_number: int, row: list,
+                    openneuro_api_key: str, dry_run: bool) -> None:
+    """Runs the purge and email prompts for a dataset reviewed as not defaced."""
+    updates = process_dataset(dataset, row, None, None, None, None, openneuro_api_key)
+    if updates:
+        write_or_print(worksheet, row_number, updates, dry_run)
 
 
 def apply_updates(row: list, updates: dict) -> list:
@@ -144,7 +157,8 @@ def main():
         "dataset",
         nargs="?",
         help="Dataset number. Without a dataset or --ds-list, every public dataset the "
-        "sheet has no defaced verdict for is reviewed.",
+        "sheet has no defaced verdict for is reviewed, and every one reviewed as not "
+        "defaced but not yet purged and emailed goes straight to purging and emailing.",
     )
     source.add_argument(
         "-f",
@@ -182,7 +196,7 @@ def main():
         dataset_list = [args.dataset]
     else:
         dataset_list = get_pending(rows)
-        print(f"Found {len(dataset_list)} datasets still to review")
+        print(f"Found {len(dataset_list)} datasets still to review, purge or email")
 
     skipped_list = []
     with tempfile.TemporaryDirectory() as out_dir:
@@ -192,6 +206,14 @@ def main():
             if dataset not in rows:
                 print(f"Skipping {dataset}: no row in the sheet")
                 skipped_list.append(dataset)
+                continue
+
+            row_number, row = rows[dataset]
+            if needs_purge_or_email(row):
+                print(f"Already reviewed as {get_cell(row, DEFACED_COL)!r}, "
+                      "going straight to purge and email")
+                purge_and_email(worksheet, dataset, row_number, row,
+                                openneuro_api_key, args.dry_run)
                 continue
 
             try:
@@ -204,15 +226,12 @@ def main():
 
             display_mosaic(path)
             review = review_dataset(dataset)
-            row_number, row = rows[dataset]
             write_or_print(worksheet, row_number, review, args.dry_run)
 
             if review[DEFACED_COL] == "no":
                 # Purge from the row as just reviewed, so the new non_defaced_files is used
-                updates = process_dataset(dataset, apply_updates(row, review), None, None,
-                                          None, None, openneuro_api_key)
-                if updates:
-                    write_or_print(worksheet, row_number, updates, args.dry_run)
+                purge_and_email(worksheet, dataset, row_number, apply_updates(row, review),
+                                openneuro_api_key, args.dry_run)
 
     if skipped_list:
         print(f"\nSkipped {skipped_list}")
