@@ -6,6 +6,9 @@ import subprocess
 import tempfile
 import keyring as kr
 import requests
+from prompt_toolkit import PromptSession
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from create_mosaic import get_mosaic_url, get_ref
 from purge_and_email import read_ds_list
 from sheet import (
@@ -43,6 +46,33 @@ def display_mosaic(path: str) -> None:
     subprocess.run(["open", path])
 
 
+def join_lines(text: str) -> str:
+    """Returns the text with its newlines dropped and each line's ends stripped."""
+    return "".join(line.strip() for line in text.splitlines())
+
+
+paste_bindings = KeyBindings()
+
+
+@paste_bindings.add(Keys.BracketedPaste)
+def insert_paste_on_one_line(event) -> None:
+    """Inserts a paste with its newlines dropped, so it neither submits the prompt
+    nor shows across several lines."""
+    event.current_buffer.insert_text(join_lines(event.data))
+
+
+text_session = None
+
+
+def input_one_line(prompt: str) -> str:
+    """Prompts for free text, keeping a multi-line paste on one line."""
+    global text_session
+    if text_session is None:
+        # Built on first use since it needs the terminal
+        text_session = PromptSession(key_bindings=paste_bindings)
+    return join_lines(text_session.prompt(prompt))
+
+
 def ask_defaced() -> str:
     """Prompts for the defaced column, which has a fixed vocabulary."""
     for number, choice in enumerate(DEFACED_CHOICES, start=1):
@@ -64,10 +94,10 @@ def review_dataset(dataset: str) -> dict:
     }
 
     if defaced.startswith("no"):
-        review[NON_DEFACED_FILES_COL] = input("non_defaced_files (regex): ").strip()
+        review[NON_DEFACED_FILES_COL] = input_one_line("non_defaced_files (regex): ")
 
-    review[SKULL_STRIPPED_COL] = input("skull_stripped (blank to skip): ").strip()
-    review[COMMENTS_COL] = input("comments_joe (blank to skip): ").strip()
+    review[SKULL_STRIPPED_COL] = input_one_line("skull_stripped (blank to skip): ")
+    review[COMMENTS_COL] = input_one_line("comments_joe (blank to skip): ")
 
     # A blank answer means leave the cell alone rather than clear it
     return {column: value for column, value in review.items() if value}
