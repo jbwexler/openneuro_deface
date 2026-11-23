@@ -42,7 +42,10 @@ def graphql_operation(json, openneuro_api_key, openneuro_url="https://openneuro.
     url = os.path.join(openneuro_url, "crn/graphql")
     
     s = requests.Session()
-    retries = Retry(total=5, backoff_factor=1, status_forcelist=[502, 503, 504])
+    # urllib3 skips retrying POST unless told to, and every graphql call is a POST.
+    # The mutations used here are safe to repeat.
+    retries = Retry(total=5, backoff_factor=1, status_forcelist=[502, 503, 504],
+                    allowed_methods=None)
     s.mount('https://', HTTPAdapter(max_retries=retries))
     response = s.post(url, headers=headers, json=json, cookies=cookies)
     
