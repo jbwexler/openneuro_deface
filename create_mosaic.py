@@ -1,8 +1,10 @@
 import argparse
+import datetime
 import os
 import re
 import keyring as kr
 from purge_and_email import graphql_operation, get_latest_snapshot, get_snapshot_tags, read_ds_list
+from sheet import MOSAIC_CREATION_COL, get_cell, get_rows, get_worksheet, write_row
 
 
 def get_mosaic_url(dataset: str, ref: str, openneuro_url: str = "https://openneuro.org/") -> str:
@@ -105,6 +107,12 @@ def main():
         action="store_true",
         help="Build the mosaic from the current draft rather than a snapshot.",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Request the mosaic even if the sheet's mosaic_creation shows it was "
+        "already requested.",
+    )
     args = parser.parse_args()
 
     openneuro_api_key = kr.get_password('openneuro_deface', 'openneuro_api_key')
@@ -114,8 +122,17 @@ def main():
     else:
         dataset_list = [args.dataset]
 
+    worksheet = get_worksheet()
+    rows = get_rows(worksheet)
+
     failed_list = []
     for dataset in dataset_list:
+        requested = get_cell(rows[dataset][1], MOSAIC_CREATION_COL) if dataset in rows else ""
+        if requested and not args.force:
+            print(f"Skipping {dataset}: mosaic_creation shows it was requested {requested}, "
+                  "pass --force to request again")
+            continue
+
         try:
             ref = get_ref(dataset, args.tag, args.draft, openneuro_api_key)
         except ValueError as error:
@@ -125,6 +142,11 @@ def main():
 
         if create_mosaic(dataset, ref, openneuro_api_key):
             print(f"  will be available at {get_mosaic_url(dataset, ref)}")
+            if dataset in rows:
+                write_row(worksheet, rows[dataset][0],
+                          {MOSAIC_CREATION_COL: str(datetime.date.today())})
+            else:
+                print(f"  {dataset} has no row in the sheet, so mosaic_creation was not filled in")
         else:
             failed_list.append(dataset)
 

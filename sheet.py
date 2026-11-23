@@ -17,6 +17,7 @@ PURGED_DATA_COL = "K"
 EMAILED_SUBMITTER_COL = "L"
 EMAILED_DATE_COL = "M"
 SKULL_STRIPPED_COL = "R"
+MOSAIC_CREATION_COL = "S"
 
 
 def open_worksheet() -> gspread.Worksheet:
