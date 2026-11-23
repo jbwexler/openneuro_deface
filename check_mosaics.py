@@ -84,21 +84,28 @@ def input_one_line(prompt: str) -> str:
     return join_lines(text_session.prompt(prompt))
 
 
-def ask_defaced() -> str:
-    """Prompts for the defaced column, which has a fixed vocabulary."""
+def ask_defaced() -> str | None:
+    """Prompts for the defaced column, which has a fixed vocabulary.
+    Returns None if the dataset should be skipped."""
     for number, choice in enumerate(DEFACED_CHOICES, start=1):
         print(f"  {number}) {choice}")
+    print("  s) skip this dataset")
 
     while True:
-        answer = input("defaced? ").strip()
+        answer = input("defaced? ").strip().lower()
+        if answer == "s":
+            return None
         if answer.isdigit() and 1 <= int(answer) <= len(DEFACED_CHOICES):
             return DEFACED_CHOICES[int(answer) - 1]
-        print(f"  Enter 1-{len(DEFACED_CHOICES)}")
+        print(f"  Enter 1-{len(DEFACED_CHOICES)} or s")
 
 
-def review_dataset(dataset: str) -> dict:
-    """Prompts for the review of one dataset, returning the columns to write."""
+def review_dataset(dataset: str) -> dict | None:
+    """Prompts for the review of one dataset, returning the columns to write,
+    or None if it was skipped."""
     defaced = ask_defaced()
+    if defaced is None:
+        return None
     review = {
         DEFACED_COL: defaced,
         DEFACE_CHECK_DATE_COL: str(datetime.date.today()),
@@ -282,6 +289,10 @@ def main():
         row_number, row = rows[dataset]
         display_mosaic(path)
         review = review_dataset(dataset)
+        if review is None:
+            print(f"Skipping {dataset}")
+            skipped_list.append(dataset)
+            return
         write_or_print(worksheet, row_number, review, args.dry_run)
 
         if review[DEFACED_COL] == "no":
